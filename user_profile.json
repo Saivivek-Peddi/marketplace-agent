@@ -1,0 +1,27 @@
+{
+  "saved_places": {
+    "home": " 2111 7th Ave, Seattle, WA",
+    "work": "Salesforce Tower, San Francisco",
+    "gym": "Equinox, Market Street, San Francisco"
+  },
+  "preferences": {
+    "default_car_type": "uberx",
+    "always_confirm": true
+  },
+  "recent_rides": [
+    {
+      "from": "Salesforce Tower, 415, Mission Street",
+      "to": "San Francisco Ferry Building, 1, The Nave",
+      "car_type": "Uber Comfort",
+      "price": 15.6,
+      "ride_id": "ride_12e22ddc"
+    },
+    {
+      "from": "San Francisco Ferry Building, 1, The Nave",
+      "to": "Salesforce Tower, 415, Mission Street",
+      "car_type": "UberX",
+      "price": 10.4,
+      "ride_id": "ride_9e07e46e"
+    }
+  ]
+}
