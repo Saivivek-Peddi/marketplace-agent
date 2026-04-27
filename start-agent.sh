@@ -4,18 +4,25 @@ set -e
 
 cd "$(dirname "$0")"
 
-# Check venv exists
-if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv .venv
-    .venv/bin/pip install -q ".[harness]"
+# Load .env if present
+if [ -f ".env" ]; then
+    set -a
+    source .env
+    set +a
 fi
 
 # Check for API key
 if [ -z "$ANTHROPIC_API_KEY" ]; then
     echo "ERROR: ANTHROPIC_API_KEY not set."
-    echo "Export it first: export ANTHROPIC_API_KEY=sk-..."
+    echo "Create a .env file: cp .env.example .env"
+    echo "Or export it: export ANTHROPIC_API_KEY=sk-..."
     exit 1
+fi
+
+# Install deps if needed
+if [ ! -f "uv.lock" ]; then
+    echo "Installing dependencies..."
+    uv sync --all-extras
 fi
 
 # Check if port 8000 is in use
@@ -24,7 +31,8 @@ if lsof -ti:$PORT > /dev/null 2>&1; then
     echo "Port $PORT is already in use."
     read -p "Kill the existing process? (yes/no): " answer
     if [ "$answer" = "yes" ] || [ "$answer" = "y" ]; then
-        lsof -ti:$PORT | xargs kill -9 2>/dev/null || true
+        lsof -ti:$PORT | xargs kill -15 2>/dev/null || true
+        sleep 1
         echo "Killed."
     else
         read -p "Enter a different port: " PORT
@@ -33,22 +41,21 @@ fi
 
 # Start mock Uber API in background
 export UBER_API_BASE="http://localhost:$PORT"
-echo "Starting mock Uber API on http://localhost:$PORT..."
-.venv/bin/uvicorn server.app:app --port "$PORT" --log-level warning &
+printf "  \033[38;5;245mStarting ride service on port $PORT...\033[0m"
+uv run uvicorn server.app:app --port "$PORT" --log-level warning &
 SERVER_PID=$!
 
 # Wait for server to be ready
 for i in {1..10}; do
     if curl -s "http://localhost:$PORT/docs" > /dev/null 2>&1; then
-        echo "Server ready."
+        printf "\r  \033[38;5;78m✓\033[0m \033[38;5;245mRide service ready on port $PORT\033[0m\n"
         break
     fi
     sleep 0.5
 done
 
-# Cleanup server on exit
-trap "echo 'Stopping server...'; kill $SERVER_PID 2>/dev/null" EXIT
+# Cleanup server on exit (graceful SIGTERM, not SIGKILL)
+trap "printf '\n  \033[38;5;245mStopping ride service...\033[0m\n'; kill -15 $SERVER_PID 2>/dev/null" EXIT
 
-# Start agent
-echo ""
-.venv/bin/python3 -m agent
+# Start agent (pass through any args like --session, --new, --sessions)
+uv run python -m agent "$@"

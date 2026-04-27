@@ -14,10 +14,25 @@ from pathlib import Path
 from typing import Any
 
 
-DB_PATH = Path("agent_memory.db")
+DB_DIR = Path("sessions")
 MAX_SHORT_TERM_MESSAGES = 40
 MAX_EPISODIC_ENTRIES = 100
 TOKEN_ESTIMATE_RATIO = 4  # ~4 chars per token
+
+
+def get_session_db(session_name: str = "default") -> Path:
+    """Get the database path for a named session."""
+    DB_DIR.mkdir(exist_ok=True)
+    return DB_DIR / f"{session_name}.db"
+
+
+def list_sessions() -> list[str]:
+    """List all available sessions."""
+    if not DB_DIR.exists():
+        return []
+    return sorted(
+        p.stem for p in DB_DIR.glob("*.db")
+    )
 
 
 @dataclass
@@ -80,8 +95,11 @@ class MemoryStore:
     - Semantic: Learned user preferences and patterns
     """
 
-    def __init__(self, db_path: str | Path = DB_PATH):
+    def __init__(self, db_path: str | Path | None = None, session_name: str = "default"):
+        if db_path is None:
+            db_path = get_session_db(session_name)
         self._db_path = Path(db_path)
+        self.session_name = session_name
         self._conn = sqlite3.connect(str(self._db_path))
         self._init_tables()
 
@@ -121,14 +139,28 @@ class MemoryStore:
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 summary TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS conversation_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL
+            );
         """)
         self._conn.commit()
 
     # --- Short-term memory (conversation) ---
 
     def add_message(self, role: str, content: Any):
-        """Add a message to short-term memory."""
+        """Add a message to short-term memory and persist to conversation log."""
         self.messages.append({"role": role, "content": content})
+        # Persist user and assistant text messages for history replay
+        if role in ("user", "assistant") and isinstance(content, str):
+            self._conn.execute(
+                "INSERT INTO conversation_log (timestamp, role, content) VALUES (?, ?, ?)",
+                (time.time(), role, content),
+            )
+            self._conn.commit()
 
     def estimate_tokens(self) -> int:
         """Rough token estimate for current conversation."""
@@ -310,6 +342,45 @@ class MemoryStore:
         for key, value in learned.items():
             parts.append(f"  - {key}: {value}")
         return "\n".join(parts)
+
+    # --- Conversation history ---
+
+    def conversation_history(self, limit: int = 20) -> list[dict]:
+        """Get recent conversation messages from the log."""
+        rows = self._conn.execute(
+            "SELECT timestamp, role, content FROM conversation_log ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        rows.reverse()  # chronological order
+        return [{"timestamp": r[0], "role": r[1], "content": r[2]} for r in rows]
+
+    def session_stats(self) -> dict:
+        """Get stats about this session."""
+        msg_count = self._conn.execute(
+            "SELECT COUNT(*) FROM conversation_log"
+        ).fetchone()[0]
+        episode_count = self._conn.execute(
+            "SELECT COUNT(*) FROM episodic"
+        ).fetchone()[0]
+        first_msg = self._conn.execute(
+            "SELECT MIN(timestamp) FROM conversation_log"
+        ).fetchone()[0]
+        last_msg = self._conn.execute(
+            "SELECT MAX(timestamp) FROM conversation_log"
+        ).fetchone()[0]
+        return {
+            "messages": msg_count,
+            "episodes": episode_count,
+            "first_message_at": first_msg,
+            "last_message_at": last_msg,
+        }
+
+    def is_resumed_session(self) -> bool:
+        """Check if this session has prior conversation history."""
+        count = self._conn.execute(
+            "SELECT COUNT(*) FROM conversation_log"
+        ).fetchone()[0]
+        return count > 0
 
     # --- Lifecycle ---
 

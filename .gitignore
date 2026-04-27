@@ -3,5 +3,6 @@ __pycache__/
 *.pyo
 .venv/
 *.db
+sessions/
 action_log.jsonl
 .env

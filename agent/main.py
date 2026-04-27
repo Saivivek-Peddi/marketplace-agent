@@ -23,14 +23,13 @@ from .config import (
     SYSTEM_PROMPT,
     TOOLS,
 )
-from .gates import confirmation_gate
-from .memory import MemoryStore
+from . import ui
+from .memory import MemoryStore, list_sessions
 from .retry import retry
 from .tools import execute, ToolResult
 
 logger = logging.getLogger(__name__)
 
-# Retry config for Claude API calls
 RETRYABLE_API_ERRORS = (
     anthropic.APIConnectionError,
     anthropic.RateLimitError,
@@ -41,12 +40,13 @@ RETRYABLE_API_ERRORS = (
 class Agent:
     """Ride-booking agent with Plan-Execute-Verify loop, memory, and guardrails."""
 
-    def __init__(self):
+    def __init__(self, session_name: str = "default"):
         self.client = anthropic.Anthropic()
         self.adapter = UberAdapter(base_url=API_BASE)
         self.profile = UserProfile(PROFILE_PATH)
         self.log = ActionLog(LOG_PATH)
-        self.memory = MemoryStore()
+        self.session_name = session_name
+        self.memory = MemoryStore(session_name=session_name)
 
     def _choose_model(self) -> str:
         models = {
@@ -54,34 +54,55 @@ class Agent:
             "2": ("claude-opus-4-6", "Opus 4.6 (smartest)"),
             "3": ("claude-haiku-4-5", "Haiku 4.5 (fastest, cheapest)"),
         }
-        print("Select a model:")
-        for key, (_, desc) in models.items():
-            print(f"  {key}. {desc}")
-        choice = input("Choice [1]: ").strip() or "1"
+        choice = ui.model_menu(models)
         model_id, desc = models.get(choice, models["1"])
-        print(f"Using: {desc}")
+        ui.success(f"Using {desc}")
         return model_id
 
     def start(self):
-        """Launch the interactive conversation loop."""
+        ui.banner()
         model = self._choose_model()
         self.model = model
 
         print()
-        print("Ride-Booking Agent (type 'quit' to exit)")
-        print(f"Model: {self.model}")
-        print("Guardrails: ON")
-        print("-" * 50)
+        ui.status_line(self.model)
+        ui.session_info(self.session_name)
 
         if not self._check_server():
             sys.exit(1)
 
-        # Recover state from previous session
+        ui.server_connected()
+        print()
+
+        # Show saved places and preferences
+        ui.saved_places(self.profile.list_places())
+        ui.preferences(self.profile.list_preferences())
+        rides = self.profile.recent_rides(3)
+        if rides:
+            ui.recent_rides(rides)
+        print()
+
+        # Show conversation history if resuming a session
+        if self.memory.is_resumed_session():
+            history = self.memory.conversation_history(limit=10)
+            stats = self.memory.session_stats()
+            if history:
+                ui.conversation_history(history, stats)
+
+        # Check for active ride from previous session
         recovery_msg = self.memory.recover_state()
         if recovery_msg:
-            print(f"[{recovery_msg}]")
-
-        print("Server connected. Ready!\n")
+            ride_id = self.memory.working.active_ride_id
+            if ride_id:
+                try:
+                    self.adapter.status(ride_id)
+                    ui.recovery(recovery_msg)
+                except Exception:
+                    self.memory.working.active_ride_id = None
+                    self.memory.working.ride_status = None
+                    self.memory.save_working_memory()
+                    ui.info("Previous ride session cleared (ride no longer active).")
+            print()
 
         try:
             self._conversation_loop()
@@ -93,44 +114,34 @@ class Agent:
             httpx.get(f"{API_BASE}/docs", timeout=5.0)
             return True
         except httpx.RequestError:
-            logger.error(f"Server not running at {API_BASE}")
-            print(f"ERROR: Server not running at {API_BASE}")
-            print("Start it first: ./start.sh or ./start-docker.sh")
+            ui.server_failed(API_BASE)
             return False
 
     def _conversation_loop(self):
         while True:
-            try:
-                user_input = input("You: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print("\nGoodbye!")
-                break
+            user_input = ui.user_prompt()
 
             if not user_input:
                 continue
             if user_input.lower() in ("quit", "exit", "q"):
-                print("Goodbye!")
+                ui.goodbye()
                 break
 
-            # Input guardrail (always on)
             is_safe, _ = check_input(user_input)
             if not is_safe:
-                print("Agent: I'm a ride booking assistant. Where would you like to go?")
+                ui.agent_blocked()
                 continue
 
             self.memory.add_message("user", user_input)
             self._agent_turn()
 
     def _build_system_prompt(self) -> str:
-        """Build system prompt with working memory, episodic context, and semantic memory."""
         parts = [SYSTEM_PROMPT.format(state=self.memory.working)]
 
-        # Add episodic context
         history = self.memory.ride_history_summary()
         if history and history != "No ride history yet.":
             parts.append(f"\n## Ride History\n{history}")
 
-        # Add semantic context
         semantic = self.memory.semantic_context()
         if semantic:
             parts.append(f"\n## User Patterns\n{semantic}")
@@ -138,23 +149,22 @@ class Agent:
         return "\n".join(parts)
 
     def _agent_turn(self):
-        """Plan-Execute-Verify loop for one agent turn."""
         tool_call_count = 0
         last_tool_call: tuple[str, str] | None = None
 
-        # Prune conversation if needed
         self.memory.prune_if_needed()
 
         while True:
             system = self._build_system_prompt()
             messages = self.memory.get_messages_for_api()
 
+            ui.thinking()
+
             try:
                 response = self._call_api(system, messages)
             except anthropic.APIError as e:
-                logger.error(f"API error: {e.message}")
-                print(f"\nAPI Error: {e.message}")
-                # Don't pop the user message — let them retry
+                ui.clear_thinking()
+                ui.error(f"API error: {e.message}")
                 self.memory.add_message(
                     "assistant",
                     "I'm having trouble connecting right now. Could you try again?",
@@ -162,6 +172,7 @@ class Agent:
                 self.memory.record_episode("error", f"API error: {e.message}")
                 break
 
+            ui.clear_thinking()
             content = response.content
 
             if response.stop_reason != "tool_use":
@@ -171,12 +182,14 @@ class Agent:
             tool_results = []
             for block in content:
                 if block.type == "text" and block.text:
-                    self._safe_print(block.text)
+                    ui.agent_message(block.text)
 
                 if block.type != "tool_use":
                     continue
 
                 tool_call_count += 1
+                ui.tool_call(block.name)
+
                 result = self._handle_tool_call(block, tool_call_count, last_tool_call)
                 tool_results.append(result["tool_result"])
                 if result.get("call_key"):
@@ -185,19 +198,15 @@ class Agent:
             self.memory.add_message("assistant", content)
             self.memory.add_message("user", tool_results)
 
-            # Loop guard
             if tool_call_count > MAX_TOOL_CALLS_PER_TURN + 2:
-                logger.warning(f"Tool call limit reached ({tool_call_count})")
-                print("Agent: Let me stop here. What would you like to do?")
+                ui.agent_message("Let me stop here. What would you like to do?")
                 self.memory.add_message(
-                    "assistant",
-                    "Let me stop here. What would you like to do?",
+                    "assistant", "Let me stop here. What would you like to do?",
                 )
                 break
 
     @retry(max_attempts=3, base_delay=1.0, retryable=RETRYABLE_API_ERRORS)
     def _call_api(self, system: str, messages: list[dict]):
-        """Call Claude API with retry logic."""
         return self.client.messages.create(
             model=self.model,
             max_tokens=1024,
@@ -209,12 +218,10 @@ class Agent:
     def _handle_tool_call(
         self, block, call_count: int, last_call: tuple[str, str] | None,
     ) -> dict:
-        """Execute a tool call with guards, verification, and memory updates."""
         tool_name = block.name
         tool_input = block.input
         tool_id = block.id
 
-        # Loop guard
         if call_count > MAX_TOOL_CALLS_PER_TURN:
             return {
                 "tool_result": {
@@ -224,7 +231,6 @@ class Agent:
                 },
             }
 
-        # Dedup guard
         params_key = json.dumps(tool_input, sort_keys=True)
         call_key = (tool_name, params_key)
         if call_key == last_call:
@@ -236,9 +242,8 @@ class Agent:
                 },
             }
 
-        # Confirmation gate
         if tool_name in GATED_TOOLS:
-            approved = confirmation_gate(tool_name, tool_input, self.adapter, self.log)
+            approved = self._confirmation_gate(tool_name, tool_input)
             if not approved:
                 self.memory.record_episode(
                     "gate_denied", f"User denied {tool_name}", {"params": tool_input}
@@ -252,7 +257,6 @@ class Agent:
                     "call_key": call_key,
                 }
 
-        # Execute
         try:
             result = execute(tool_name, tool_input, self.adapter, self.profile)
         except Exception as e:
@@ -267,17 +271,11 @@ class Agent:
                 "call_key": call_key,
             }
 
-        # --- Verify & Update Memory ---
         self.memory.working.update_from_tool(tool_name, result.data)
         self.memory.save_working_memory()
-
-        # Record episodes for significant events
         self._record_episodes(tool_name, result)
-
-        # Learn from user behavior
         self._learn_from_action(tool_name, result)
 
-        # Log
         self.log.record(
             tool=tool_name,
             intent=f"{tool_name} call",
@@ -297,10 +295,34 @@ class Agent:
             "call_key": call_key,
         }
 
-    def _record_episodes(self, tool_name: str, result: ToolResult):
-        """Record significant events to episodic memory."""
-        data = result.data
+    def _confirmation_gate(self, tool_name: str, params: dict) -> bool:
+        """Pretty confirmation gate using ui module."""
+        details = []
+        if tool_name == "cancel_ride":
+            try:
+                fee = self.adapter.cancel_fee(params["ride_id"])
+                details.append(f"Cancel fee: ${fee.fee.amount:.2f}")
+                details.append(f"Reason: {fee.reason}")
+            except Exception:
+                details.append("(Could not fetch cancel fee preview)")
 
+        answer = ui.confirmation_box(tool_name, details)
+        approved = answer in ("yes", "y")
+
+        self.log.record(
+            tool=tool_name,
+            intent=f"Confirmation gate for {tool_name}",
+            params=params,
+            gate_required=True,
+            gate_decision="approved" if approved else "denied",
+            gate_message=f"User said: {answer}",
+            success=approved,
+        )
+
+        return approved
+
+    def _record_episodes(self, tool_name: str, result: ToolResult):
+        data = result.data
         if tool_name == "book_ride" and not data.get("error"):
             self.memory.record_episode(
                 "ride_booked",
@@ -327,9 +349,7 @@ class Agent:
             )
 
     def _learn_from_action(self, tool_name: str, result: ToolResult):
-        """Update semantic memory based on user patterns."""
         data = result.data
-
         if tool_name == "book_ride" and data.get("car_type_name"):
             current = self.memory.recall("preferred_car_type")
             car = data["car_type_name"]
@@ -344,17 +364,27 @@ class Agent:
             self.memory.learn(f"explicit_pref_{key}", value, confidence=1.0)
 
     def _handle_text_response(self, content):
-        """Print final text response with output guardrail."""
+        text_parts = []
         for block in content:
             if hasattr(block, "text") and block.text:
-                self._safe_print(block.text)
+                is_safe, reason = check_output(block.text)
+                if not is_safe:
+                    logger.warning(f"Output blocked: {reason}")
+                    ui.agent_blocked()
+                    return
+                ui.agent_message(block.text)
+                text_parts.append(block.text)
+        # Save raw content for Claude API, and text for conversation log
         self.memory.add_message("assistant", content)
+        if text_parts:
+            # Also log the readable text for history replay
+            self._log_assistant_text("\n".join(text_parts))
 
-    def _safe_print(self, text: str):
-        """Print with output guardrail."""
-        is_safe, reason = check_output(text)
-        if not is_safe:
-            logger.warning(f"Output blocked: {reason}")
-            print("Agent: I'm a ride booking assistant. Where would you like to go?")
-            return
-        print(f"Agent: {text}")
+    def _log_assistant_text(self, text: str):
+        """Save assistant text to conversation log for history replay."""
+        import time as _time
+        self.memory._conn.execute(
+            "INSERT INTO conversation_log (timestamp, role, content) VALUES (?, ?, ?)",
+            (_time.time(), "assistant", text),
+        )
+        self.memory._conn.commit()

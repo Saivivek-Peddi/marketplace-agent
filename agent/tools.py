@@ -103,6 +103,17 @@ def _book_ride(
         f"Price: ${r.price:.2f}\n"
         f"Pickup: {r.pickup_address}"
     )
+    # Save to ride history immediately at booking (don't wait for completion)
+    existing = {rd.get("ride_id") for rd in profile.recent_rides(20)}
+    if r.ride_id not in existing:
+        profile.add_recent_ride({
+            "from": r.pickup_address,
+            "to": r.dropoff_address if hasattr(r, "dropoff_address") else "—",
+            "car_type": r.car_type_name,
+            "price": r.price,
+            "ride_id": r.ride_id,
+            "status": r.status,
+        })
     return ToolResult(
         display=display,
         data={
@@ -146,15 +157,13 @@ def _check_status(
     if r.trip.final_fare is not None:
         lines.append(f"Final fare: ${r.trip.final_fare:.2f}")
         data["final_fare"] = r.trip.final_fare
-        existing = {rd.get("ride_id") for rd in profile.recent_rides(20)}
-        if r.ride_id not in existing:
-            profile.add_recent_ride({
-                "from": r.pickup_address,
-                "to": r.dropoff_address,
-                "car_type": r.car_type_name,
-                "price": r.trip.final_fare,
-                "ride_id": r.ride_id,
-            })
+        # Update existing ride entry with final fare and completed status
+        for rd in profile.recent_rides(20):
+            if rd.get("ride_id") == r.ride_id:
+                rd["price"] = r.trip.final_fare
+                rd["status"] = "completed"
+                profile._save()
+                break
     return ToolResult(display="\n".join(lines), data=data)
 
 
