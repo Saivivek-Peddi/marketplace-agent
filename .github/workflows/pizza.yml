@@ -1,0 +1,24 @@
+name: pizza
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: Customer name
+        default: "Sai Vivek Peddi"
+      phone:
+        description: Phone number for the driver
+        required: true
+      dry_run:
+        description: Price only, do not place
+        default: "false"
+
+jobs:
+  order:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run pizza agent
+        run: |
+          FLAGS="--yes"
+          if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; fi
+          python3 -m pizza_agent.order_now --name "${{ inputs.name }}" --phone "${{ inputs.phone }}" $FLAGS
