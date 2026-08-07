@@ -51,44 +51,48 @@ def main() -> int:
 
     first, _, last = args.name.partition(" ")
     last = last or "Agent"
-
-    log(f"Locating Domino's stores that deliver to {args.street}, {args.city}...")
-    stores = dominos.find_stores(args.street, f"{args.city}, {args.region} {args.postal}")
-    if not stores:
-        log("No stores found — check the address.")
-        return 1
-    store = stores[0]
-    store_id = store["StoreID"]
-    log(f"Nearest open store: #{store_id} — {store.get('AddressDescription', '?').strip()} "
-        f"({store.get('MinDistance', '?')} mi, est. wait {store.get('ServiceMethodEstimatedWaitMinutes', {}).get('Delivery', {}).get('Min', '?')}-"
-        f"{store.get('ServiceMethodEstimatedWaitMinutes', {}).get('Delivery', {}).get('Max', '?')} min)")
-
     size_code = dominos.SIZES[args.size]
-    log(f"Building order: {args.qty}x {args.size} hand-tossed pepperoni + jalapeño ({size_code})")
-    order = dominos.build_order(
-        store_id=store_id,
-        street=args.street,
-        city=args.city,
-        region=args.region,
-        postal_code=args.postal,
-        first_name=first,
-        last_name=last,
-        phone=args.phone,
-        email=args.email,
-        size_code=size_code,
-        quantity=args.qty,
-        delivery_instructions=DELIVERY_NOTE,
-    )
 
-    log("Pricing order with the store...")
-    priced = dominos.price_order(order)
-    errs = dominos.errors_in(priced)
-    if errs:
-        log(f"Pricing failed: {errs}")
-        print(priced)
+    # Some stores near the boundary reject the address (ServiceMethodNotAllowed),
+    # so try every nearby store, and both plausible zips for Embarcadero Center.
+    zips = [args.postal] + [z for z in ("94111", "94105") if z != args.postal]
+    order = priced = store = None
+    total = None
+    for postal in zips:
+        log(f"Locating stores that deliver to {args.street}, {args.city} {postal}...")
+        stores = dominos.find_stores(args.street, f"{args.city}, {args.region} {postal}")
+        for candidate in stores[:6]:
+            sid = candidate["StoreID"]
+            log(f"Trying store #{sid} — {candidate.get('AddressDescription', '?').splitlines()[0]} "
+                f"({candidate.get('MinDistance', '?')} mi)")
+            attempt = dominos.build_order(
+                store_id=sid,
+                street=args.street,
+                city=args.city,
+                region=args.region,
+                postal_code=postal,
+                first_name=first,
+                last_name=last,
+                phone=args.phone,
+                email=args.email,
+                size_code=size_code,
+                quantity=args.qty,
+                delivery_instructions=DELIVERY_NOTE,
+            )
+            result = dominos.price_order(attempt)
+            errs = dominos.errors_in(result)
+            if errs:
+                log(f"  store #{sid} rejected: {errs}")
+                continue
+            order, priced, store = attempt, result, candidate
+            total = dominos.order_total(priced)
+            break
+        if order:
+            break
+    if not order:
+        log("Every nearby store rejected the order — dumping last response:")
         return 1
-    total = dominos.order_total(priced)
-    log(f"Priced. Total (incl. tax & delivery): ${total}")
+    log(f"✅ Store #{store['StoreID']} accepted. Total (incl. tax & delivery): ${total}")
 
     # Carry forward server-side adjustments (order ID, amounts) into the order we place.
     for key in ("OrderID", "Amounts", "EstimatedWaitMinutes", "BusinessDate", "PriceOrderTime"):
