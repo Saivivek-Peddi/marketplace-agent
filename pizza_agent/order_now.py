@@ -23,7 +23,7 @@ from . import dominos
 VENUE_STREET = "3 Embarcadero Center"
 VENUE_CITY = "San Francisco"
 VENUE_REGION = "CA"
-VENUE_ZIP = "94111"
+VENUE_ZIP = "94105"
 DELIVERY_NOTE = (
     "Codi event space - AlphaSignal Pizza Agent Challenge. "
     "Look for the PIZZA CHALLENGE signs. Please call on arrival."
