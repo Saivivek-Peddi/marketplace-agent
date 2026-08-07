@@ -1,24 +1,17 @@
 name: pizza
 on:
-  workflow_dispatch:
-    inputs:
-      name:
-        description: Customer name
-        default: "Sai Vivek Peddi"
-      phone:
-        description: Phone number for the driver
-        required: true
-      dry_run:
-        description: Price only, do not place
-        default: "false"
+  push:
+    branches: ["claude/new-session-meg81h"]
 
 jobs:
   order:
+    if: contains(github.event.head_commit.message, '[pizza')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run pizza agent
-        run: |
-          FLAGS="--yes"
-          if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="--dry-run"; fi
-          python3 -m pizza_agent.order_now --name "${{ inputs.name }}" --phone "${{ inputs.phone }}" $FLAGS
+      - name: Dry run (price only)
+        if: "!contains(github.event.head_commit.message, '[pizza-order]')"
+        run: python3 -m pizza_agent.order_now --name "Sai Vivek Peddi" --phone "5302207864" --dry-run
+      - name: Place order for real
+        if: contains(github.event.head_commit.message, '[pizza-order]')
+        run: python3 -m pizza_agent.order_now --name "Sai Vivek Peddi" --phone "5302207864" --yes
