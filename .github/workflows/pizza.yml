@@ -9,8 +9,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Debug probe
+        if: contains(github.event.head_commit.message, '[pizza-debug]')
+        run: python3 -m pizza_agent.debug_probe
       - name: Dry run (price only)
-        if: "!contains(github.event.head_commit.message, '[pizza-order]')"
+        if: "!contains(github.event.head_commit.message, '[pizza-order]') && !contains(github.event.head_commit.message, '[pizza-debug]')"
         run: python3 -m pizza_agent.order_now --name "Sai Vivek Peddi" --phone "5302207864" --dry-run
       - name: Place order for real
         if: contains(github.event.head_commit.message, '[pizza-order]')
