@@ -226,65 +226,114 @@ def main():
         print("CHECKOUT:", body_text(page, 3000))
         dump_controls(page, "checkout")
 
-        # guest, else sign up
-        if not click_rx(page, r"(as guest|guest checkout|continue as guest|without.*account)"):
-            if click_rx(page, r"sign ?up"):
-                fill_any(page, ["first"], "Sai Vivek")
-                fill_any(page, ["last"], "Peddi")
-                fill_any(page, ["email"], EMAIL)
-                fill_any(page, ["phone"], PHONE)
-                fill_any(page, ["password"], PASSWORD)
-                try:
-                    page.locator("input[type=password]").nth(1).fill(PASSWORD, timeout=1500)
-                except Exception:
-                    pass
-                click_rx(page, r"(create|register|sign ?up)$")
-                page.wait_for_timeout(3000)
-                snap(page, "signup")
-                print("after signup:", body_text(page, 1200))
+        # ---- Checkout details page (guest form + delivery address) ----
+        if "checkout" not in page.url:
+            page.goto(f"{BASE}/ordering/checkout/details", wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
 
-        fill_any(page, ["first"], "Sai Vivek")
-        fill_any(page, ["last"], "Peddi")
-        fill_any(page, ["email"], EMAIL)
-        fill_any(page, ["phone"], PHONE)
+        def fill_exact(name, value):
+            try:
+                page.locator(f"input[name='{name}'], textarea[name='{name}']").first.fill(value, timeout=2000)
+                print(f"[filled {name}]")
+                return True
+            except Exception as e:
+                print(f"[fill {name} failed {type(e).__name__}]")
+                return False
+
+        fill_exact("firstName", "Sai Vivek")
+        fill_exact("lastName", "Peddi")
+        fill_exact("email", EMAIL)
+        fill_exact("guestPhone", PHONE)
+        # untick marketing spam if on
+        for cb in ("subscribe", "smsMarketing"):
+            try:
+                page.locator(f"input[name='{cb}']").first.uncheck(timeout=1200)
+            except Exception:
+                pass
+        try:
+            page.select_option("select[name='addressType']", label="Business", timeout=3000)
+            print("[addressType=Business]")
+        except Exception as e:
+            print("[addressType failed]", e)
+        page.wait_for_timeout(2500)
+        snap(page, "address-type")
+        dump_controls(page, "address-form", 60)
+        # address fields revealed after type selection
+        fill_any(page, ["business", "company", "organization"], "Codi - AlphaSignal Pizza Challenge")
         fill_any(page, ["street", "address"], "3 Embarcadero Center")
-        fill_any(page, ["apt", "suite", "unit"], "Street level")
+        fill_any(page, ["suite", "apt", "unit", "floor"], "Street level")
         fill_any(page, ["zip", "postal"], "94111")
         fill_any(page, ["city"], "San Francisco")
-        fill_any(page, ["cross"], "Clay St & Front St")
-        fill_any(page, ["instruction", "note", "comment", "delivery"], INSTRUCTIONS)
-        page.wait_for_timeout(1000)
-        snap(page, "filled")
-        dump_controls(page, "filled")
-        for pat in (r"continue", r"next"):
-            click_rx(page, pat)
-        snap(page, "post-continue")
-        print("post-continue:", body_text(page, 2500))
-        dump_controls(page, "post-continue", 50)
+        fill_any(page, ["cross"], "Sacramento St & Front St")
+        fill_any(page, ["instruction", "note", "comment"], INSTRUCTIONS)
+        snap(page, "details-filled")
+        try:
+            page.locator("#continue-to-order-details-btn").click(timeout=4000)
+            print("[continue to order details]")
+        except Exception:
+            click_rx(page, r"continue to order details")
+        page.wait_for_timeout(3500)
+        snap(page, "order-details")
+        od_text = body_text(page, 3500)
+        print("ORDER DETAILS:", od_text)
+        dump_controls(page, "order-details", 50)
+        fill_any(page, ["instruction", "note", "comment"], INSTRUCTIONS)
 
-        cash = any(click_rx(page, p) for p in
-                   (r"\bcash\b", r"pay at (the )?(door|store)", r"pay in person"))
+        # continue to payment
+        cont = False
+        for sel in ("#continue-to-payment-btn", "button:has-text('CONTINUE')"):
+            try:
+                page.locator(sel).first.click(timeout=3500)
+                cont = True
+                print(f"[continued via {sel}]")
+                break
+            except Exception:
+                continue
+        if not cont:
+            click_rx(page, r"(payment|continue)")
+        page.wait_for_timeout(3500)
+        snap(page, "payment-page")
+        pay_text = body_text(page, 3500)
+        print("PAYMENT PAGE:", pay_text)
+        dump_controls(page, "payment", 60)
+
+        # pick cash
+        cash = False
+        for sel in ("label:has-text('Cash')", "input[value*='cash' i]", "text=/pay.*(store|door|cash)/i"):
+            try:
+                page.locator(sel).first.click(timeout=2500)
+                cash = True
+                print(f"[cash via {sel}]")
+                break
+            except Exception:
+                continue
+        page.wait_for_timeout(1500)
         body = body_text(page, 3500)
-        print(f"[cash: {cash}]")
-        print("PAYMENT:", body)
-        snap(page, "payment")
+        snap(page, "payment-selected")
         m = re.search(r"total[^$]*\$([0-9]+\.[0-9]{2})", body, re.I)
         total = float(m.group(1)) if m else None
-        print(f"[total: {total}]")
-
-        has_pizza = bool(re.search(r"pepperoni", body, re.I))
-        has_jal = bool(re.search(r"jalape", body, re.I))
+        has_pizza = bool(re.search(r"pepperoni", od_text + body, re.I))
+        has_jal = bool(re.search(r"jalape", od_text + body, re.I))
         print(f"[guards] pepperoni={has_pizza} jalapeno={has_jal} cash={cash} total={total}")
 
         if not PLACE:
             print("[DRY MODE — not placing]")
-        elif not (has_pizza and has_jal and cash) or (total is not None and total > MAX_TOTAL):
+        elif not (has_pizza and cash) or (total is not None and total > MAX_TOTAL):
             print("[GUARDS FAILED — not placing]")
+            if not has_jal:
+                print("[note: jalapeño missing would also have blocked]")
+        elif not has_jal:
+            print("[GUARDS FAILED — jalapeño missing from order]")
         else:
-            for pat in (r"place order", r"submit order", r"complete order", r"finish"):
-                if click_rx(page, pat, timeout=6000):
+            for sel in ("#place-order-btn", "button:has-text('PLACE ORDER')",
+                        "button:has-text('SUBMIT ORDER')", "button:has-text('COMPLETE')"):
+                try:
+                    page.locator(sel).first.click(timeout=5000)
+                    print(f"[PLACED via {sel}]")
                     break
-            page.wait_for_timeout(8000)
+                except Exception:
+                    continue
+            page.wait_for_timeout(9000)
             snap(page, "placed")
             print("FINAL:", body_text(page, 3000))
         browser.close()
