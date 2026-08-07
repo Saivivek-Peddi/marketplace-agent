@@ -12,6 +12,9 @@ jobs:
       - name: Debug probe
         if: contains(github.event.head_commit.message, '[pizza-debug]')
         run: python3 -m pizza_agent.debug_probe
+      - name: Recon
+        if: contains(github.event.head_commit.message, '[pizza-recon]')
+        run: python3 -m pizza_agent.recon
       - name: Dry run (price only)
         if: "!contains(github.event.head_commit.message, '[pizza-order]') && !contains(github.event.head_commit.message, '[pizza-debug]')"
         run: python3 -m pizza_agent.order_now --name "Sai Vivek Peddi" --phone "5302207864" --dry-run
